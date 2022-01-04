@@ -1,0 +1,223 @@
+---
+title: "Identifying Voting Blocs for the House of Representatives in the 117th Session of Congress"
+author: "Brandon Winder"
+date: "12-9-2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Load all necessary libraries.
+library(dplyr)
+library(cluster)
+library(fpc)
+library(factoextra)
+library(ggpubr)
+library(MASS)
+library(tidyr)
+library(tidyverse)
+library(knitr)
+library(gridExtra)
+```
+
+```{r include=FALSE}
+                             ### Setting up the data ### 
+
+# Upload data.
+ideology <- read.csv("H117_members.csv")
+votes <- read.csv("H117_votes.csv")
+
+# Remove the congress and chamber variables because they are all the House of Representative for the 117th congress. 
+# Remove the variable occupancy, last_means, and conditional because they are all NA. 
+ideology <- ideology[, -c(1,8,9,20)]
+
+# Remove the congress and chamber variables because they are all the House of Representative for the 117th congress.
+votes <- votes[,-c(1,2)]
+
+# Change some of the variables that can be factors to factors for the ideology dataset. Change the levels of party_code to be Democrat or Republican because those are the only two levels in the dataset.
+ideology$chamber <- as.factor(ideology$chamber)
+ideology$state_icpsr <- as.factor(ideology$state_icpsr)
+ideology$state_abbrev <- as.factor(ideology$state_abbrev)
+ideology$party_code <- as.factor(ideology$party_code)
+levels(ideology$party_code) <- c("D", "R")
+ideology <- ideology %>% mutate(var_comb = sub(",.*", "", ideology$bioname))
+ideology <- ideology %>% unite(var_comb, var_comb, state_abbrev, party_code, remove = FALSE)
+
+# Change icpsr to a character variable in both data sets.
+ideology$icpsr <- as.character(ideology$icpsr)
+votes$icpsr <- as.character(votes$icpsr)
+
+# Join the two data frames together.
+full_dat <- full_join(ideology, votes, by = c("icpsr" = "icpsr"))
+
+# Remove died because there is only one member that died.
+# Remove the observations that are Presidents because they have NA for all the nominate variables.
+# Replace the observations that have NAs for the born variable. Each NA is for PFLUGER, August, who was born in 1978.
+nas_born <- which(is.na(full_dat$born))
+full_dat$born[nas_born] <- 1978
+nas_nominate <- which(is.na(full_dat$nominate_dim1))
+died_obs <- which(!is.na(full_dat$died))
+full_dat <- full_dat[-c(1:22, nas_nominate, died_obs), -c(11)]
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Find the unique icpsr strings to identify all of the members. Also find the first row number for these members.
+IDs <- unique(full_dat$icpsr)
+IDs_num <- c()
+for(i in 1:length(IDs)){
+  num <- which(full_dat$icpsr == IDs[i])[1]
+  IDs_num[i] <- num
+}
+
+# Create a subset of the full data that contains the characteristics of the members.
+first_obv_ID <- full_dat[IDs_num, c(1:10, 19, 20)]
+
+# Split the data into a list based on the icpsr variable. Create a list of data frames specific to each member. 
+dat_list <- split(full_dat, full_dat$icpsr)
+
+# Initialize a n by n matrix where n is the number of members within the data set. Make the row and column names the icpsr. This will be a dissimilarity matrix for the data.
+dis_mat <- matrix(0, length(IDs), length(IDs))
+colnames(dis_mat) <- first_obv_ID$var_comb
+rownames(dis_mat) <- first_obv_ID$var_comb
+
+# Fill the matrix created above with the number of times congressmen voted differently on the bills.
+for(i in 1:length(IDs)){
+  person <- dat_list[[IDs[i]]]
+  for(j in 1:length(IDs)){
+    comp_person <- dat_list[[IDs[j]]]
+    addition <- ifelse(person$cast_code == comp_person$cast_code, 0, 1)
+    tot_dif <- sum(addition)
+    dis_mat[i, j] <- tot_dif
+    dis_mat[j, i] <- tot_dif
+  }
+}
+```
+
+```{r include=FALSE}
+# Look at the stress values for the first 6 dimensions.
+vote_stress <- NULL
+for(i in 1:6){
+  vote_stress[i] <- isoMDS(dis_mat, k = i)$stress
+}
+plot(vote_stress)
+
+# Run non-metric multi-dimensional scaling on the dissimilarity matrix with k=2.
+vote_mds <- isoMDS(dis_mat)
+
+# Add the two dimensions to the first_obv_ID dataframe.
+first_obv_ID <- first_obv_ID %>% mutate(Dim1 = vote_mds$points[,1], Dim2 = vote_mds$points[,2])
+
+# Plot the multi-dimensional scaling results.  
+plot1 <- ggscatter(first_obv_ID, x="Dim1", y="Dim2", point=T, font.label = c(5, "plain", "black"), ylim=c(-250,50), xlim=c(-150,200), title = "Non-Metric MDS", xlab = "Coordinate 1", ylab = "Coordinate 2", ggtheme = theme_bw())
+plot1
+```
+
+
+```{r include=FALSE}
+set.seed(122)
+# Run a kmeans clustering using the two dimension variables created from the MDS. Start with creating two clusters.
+clust <- kmeans(first_obv_ID[,c(13,14)], 2)$cluster
+first_obv_ID <- first_obv_ID %>% mutate(Cluster = as.factor(clust))
+levels(first_obv_ID$Cluster) <- c("GOP", "Dem")
+
+# Look at the number of members in each cluster.
+counts_clust_2 <- first_obv_ID %>% count(Cluster, party_code)
+colnames(counts_clust_2) <- c("Cluster", "Actual Party", "n")
+
+# Plot the MDS results and color by cluster. Also label the points with their party code.
+plot2 <- ggscatter(first_obv_ID, x="Dim1", y="Dim2", label = "party_code", color = "Cluster", point=F, font.label = c(5, "plain", NULL), ylim=c(-250,50), xlim=c(-150,200), pallette = "jco", size=1, ellipse=T, ellipse.type="convex", title = "A", xlab = "Coordinate 1", ylab = "Coordinate 2", ggtheme = theme_bw())
+plot2
+```
+
+
+```{r include=FALSE}
+set.seed(13)
+# Run the kmeans clustering again but create 3 clusters.
+clust2 <- kmeans(first_obv_ID[,c(13,14)], 3)$cluster
+first_obv_ID <- first_obv_ID %>% mutate(Cluster = as.factor(clust2))
+levels(first_obv_ID$Cluster) <- c("Other", "GOP", "Dem")
+
+# Look at the number of members in each cluster.
+counts_clust_3 <- first_obv_ID %>% count(Cluster, party_code)
+colnames(counts_clust_3) <- c("Cluster", "Actual Party", "n")
+
+# Plot the members and color by the group. Also label each member with their last name, state, and party code.
+plot3 <- ggscatter(first_obv_ID, x="Dim1", y="Dim2", label = "var_comb", color = "Cluster", point=F, font.label = c(3, "plain", NULL), ylim=c(-250,50), xlim=c(-150,200), pallette = c("red", "green", "blue"), ellipse=T, ellipse.type="convex", title = "B", xlab = "Coordinate 1", ylab = "Coordinate 2", ggtheme = theme_bw())
+plot3
+```
+
+
+```{r include=FALSE}
+# Count the number of Republicans and Democrats by state.
+counts_by_state <- first_obv_ID %>% count(state_abbrev, party_code)
+
+# Make a data frame of the states and number of Republicans and Democrats for the members in the smaller cluster above.
+in_cluster_3 <- data.frame(Rep = c(24, 12, 5, 16, 1, 11, 8), Dem = c(13, 4, 2, 11, 3, 42, 19), Tot_num = c(37, 16, 7, 27, 4, 53, 27))
+rownames(in_cluster_3) <- c("TX", "OH", "LA", "FL", "NM", "CA", "NY")
+in_cluster_3 <- as.data.frame(t(in_cluster_3))
+```
+
+
+# Description of Data
+
+This project looks at identifying voting blocs within the House of Representatives (HOR) in the 117th session of Congress. Both member ideology and members' votes were collected through the website "https://voteview.com/data". The member ideology dataset contained basic demographics for the members in the HOR such as their name, state, district, party, birth, and death year. The members' votes dataset contained votes taken by every member. For each of these datasets, every member is assigned an ICPSR ID number. This ID number was used to combine the two datasets so that each members demographic data could be matched with their vote for every bill voted on in the 117th session of Congress. 
+
+Some data cleaning was necessary, primarly due to missing values in the ideology dataset. First, the votes that were cast by the President and Vice President were removed because the members in the House of Representatives are those of interest for this analysis. It was found that Ron Wright died in 2021 and he only voted on 30 out of the 371 bills in the dataset. So, each of Wright's votes were removed from the dataset. Then, August Pfluger did not have a reported birth year. So, 371 missing values in the Born variable were replaced by 1978, the year Pfluger was born. Table 1 shows a subset of the data for the first bill voted on in the House of Representatives.
+
+```{r echo=FALSE}
+# Display three random members in the first observation ID data frame.
+kable(first_obv_ID[c(1,79, 251), c(2,6:8, 10, 12)], caption = "Table 1. Data on the first bill voted on for three members in the HOR.")
+```
+
+
+# Methods
+
+To determine voting blocs within the House of Representatives, a multidimensional scaling (MDS) technique was used. MDS was used because it is a nice way to visually represent the distances or dissimilarities between individual cases. For this project, the dissimilarities of interest are the difference in votes between each of the members in the HOR. But, the data collected did not contain the number of times each member voted differently than the other members. So, a dissimilarity matrix needed to be created in order to utilize MDS. To do this, each member needed to be compared to every other member in the House of Representatives for each vote cast; then the results were entered into a 437 by 437 matrix to create the dissimilarity matrix used for MDS. The first three members in the matrix can be seen in Table 2. This table shows that Rogers, a Republican Representative from Alabama, voted differently 249 and 74 times from two other Representatives from Alabama, Sewell (Dem.) and Brooks (Rep.), respectively. It also shows that Sewell and Brooks voted differently 292 times.
+
+```{r echo=FALSE}
+# Display the first three members data from the dissimilarity matrix.
+kable(dis_mat[1:3, 1:3], caption = "Table 2. The number of times members voted differently for the first three members.")
+```
+
+The dissimilarity matrix was then used in Kruskal's non-metric multidimensional scaling with two dimensions. When using two dimensions, the stress reported was 5.51%, which represents a good fit. When increasing the dimensions to three, the stress only decreased to 5.45%. So, the two dimensional MDS was used for the next step in the analysis. The next step taken in this analysis was using K-means clustering to identify voting blocs within the HOR. To do this, the fitted configuration for the two dimensions from the MDS were used within a K-means clustering algorithm two times to generate two different sets of clusters. For the first set, two clusters were created to identify the two main political parties in the HOR. Then, the second time the K-means clustering was used with three clusters to try and identify members that are not voting similarly to their affiliated party.
+
+
+# Results
+
+```{r echo=FALSE, fig.cap="Figure 1. Basic scatter plot of the non-metric multidimensional scaling.", fig.dim=c(3.5,2.25)}
+# Display the plot of points from the first two dimensions of MDS.
+plot1
+```
+
+The results from the basic two-dimensional non-metric MDS are plotted in a scatter plot where the x-axis is the first dimensions fitted configuration and the y-axis is the second dimensions fitted configurations (Figure 1). This graph visually represents the similarities and difference for all 437 members in the HOR for the 117th session of Congress. The points in this graph were then modified to represent demographic attributes about the members to obtain a better understanding of the clusters. The points were also color coded and convex ellipses were drawn to visualize the two different clustering sets that were completed (Figure 2). In plot (A) from Figure 2, the red cluster was categorized as "GOP" because all of the members in the cluster are Republicans and the blue cluster is "Dem." because the majority of the members are Democrats. The K-means clustering algorithm had a classification rate of 99.1% because only 4 Republicans were mis-classified as Democrats (Figure 3).
+
+```{r echo=FALSE, fig.cap="Figure 2. Scatter plots showing the clustering created by the K-means clustering. Plot A shows the clusters when using two centers for K-means. Plot B shows the clusters when using three centers for K-means.", fig.dim=c(4.35,4.35)}
+# Plot both of the MDS plots with clusters.
+grid.arrange(plot2, plot3, nrow=2, top = "Voting Blocs in the House of Representatives")
+```
+
+In plot (B) from Figure 2, the green cluster was categorized as "GOP" because all the members in that cluster are Republicans, the blue cluster is "Dem." because all the members are Democrats, and the red cluster is "Other" because there is a similar number of members from each party. 
+
+```{r echo=FALSE, fig.cap="Figure 3. Displays the number of members in each cluster for both sets and compare that to the actual party for the members."}
+clust_2_grop <- tableGrob(counts_clust_2)
+clust_3_grop <- tableGrob(counts_clust_3)
+
+grid.arrange(arrangeGrob(clust_2_grop, top = "Clustering A"), arrangeGrob(clust_3_grop, top = "Clustering B"), ncol=2, top = "Members in Each Cluster for Both Sets of Clusters")
+```
+
+There is seven Democrats and six Republicans in the "Other" cluster which shows that these members are often not voting the same as the rest of their party (Figure 3). Each member that is included in the "Other" cluster can be seen in Table 3. This table shows the state the members represent and the party they are affiliated with. There are 53, 27, 27, 16, 37 total Representatives from CA, FL, NY, OH, and TX, respectively. So, the proportion of Representatives for each of these five States is not very large. But for the other two States in this cluster, the proportion of representatives in the "Other" cluster is much larger (43% for LA and 50% for NM). The only two Democratic Representatives from LA are clustered in the "Other" category. This shows that the Democratic Representatives from LA do not vote similarly to the other Democratic Representatives.
+
+*Table 3. Members included in the "Other" cluster from plot (B) in Figure 2.*
+
+CA | FL | LA | NM | NY | OH | TX |
+--- | --- | --- | --- | --- | --- | --- |
+Pelosi(D) |Salazar(R) | Letlow(R)| Haaland(D) | Tenney(R) | Fudge(D) | Ellzey(R) |
+Valadao(R) |Hastings(D)| Richmond(D)| Stansbury(D) |  | Stivers(R) |  |
+  |  |  | Carter(D) |  |  |  |
+
+# Conclusion
+
+To summarize the analysis done on the votes cast by members in the US House of Representatives of the 117th session of Congress, Kruskal's non-metric multidimensional scaling was used within K-means clustering algorithms to gain an understanding of voting blocs. The results of this analysis do show what would be expected. There are two large voting blocs that consist of Representatives of the same party and there are a few members that have differing voting patterns than the rest of their party (Figure 2. B). Additionally, when only identifying two clusters there is a classification rate of 99.1% (Figure 3.), showing that generally Representatives vote similarly to others within their political party. Finally, we can identify 13 representatives from seven different States that have differing voting patterns than their party typically has (Table 3). Of these 13 representatives, three of them (1 Rep. and 2 Dem.) are from Louisiana (LA) and LA only has 7 total members in the HOR (5 Rep. and 2 Dem.). Both of the Democratic Representatives from LA do not have similar voting patterns to the rest of the Democrats in the HOR. This is an interesting finding and may be something to look into in further studies to determine if Democrats from Louisiana have differing beliefs than Democrats from other states.
+
+
